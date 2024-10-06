@@ -139,6 +139,13 @@ struct type_node {
     bool(* const compare)(const void *, const void *);
     type(* const remove_pointer)() noexcept;
     type(* const clazz)() noexcept;
+
+    struct template_typedata {
+        type_node* template_type;
+		gsl::span<type_node*> inner_types;
+    };
+    template_typedata(*const template_type)() noexcept;
+
     base_node *base{nullptr};
     conv_node *conv{nullptr};
     ctor_node *ctor{nullptr};
@@ -595,6 +602,10 @@ public:
         return valid;
     }
 
+
+	any convert(meta::type type) const;
+	bool convert(meta::type type);
+
     /**
      * @brief Replaces the contained object by initializing a new instance
      * directly.
@@ -691,6 +702,8 @@ public:
         : node{any.node},
           instance{any.instance}
     {}
+
+	inline handle(type type, void* instance_) noexcept;
 
     /**
      * @brief Constructs a meta handle from a given instance.
@@ -1452,6 +1465,15 @@ public:
         return any;
     }
 
+	any invoke_generic(handle handle, size_t argc, any* argv) const {
+		any any{};
+		if (argc == size()) {
+			any = node->invoke(handle, argv);
+		}
+
+		return any;
+	}
+
     /**
      * @brief Iterates all the properties assigned to a meta function.
      * @tparam Op Type of the function object to invoke.
@@ -1524,6 +1546,7 @@ inline bool operator!=(const func &lhs, const func &rhs) noexcept {
 class type {
     /*! @brief A meta node is allowed to create meta objects. */
     template<typename...> friend struct internal::info_node;
+	friend class handle;
 
     type(const internal::type_node *curr) noexcept
         : node{curr}
@@ -1653,6 +1676,16 @@ public:
      */
     meta::type remove_pointer() const noexcept {
         return node->remove_pointer();
+    }
+
+    meta::type template_type() const noexcept {
+        auto ty = node->template_type();
+        return meta::type(ty.template_type);
+    }
+
+    meta::type template_inner_type(int type_idx = 0) const noexcept {
+        auto ty = node->template_type();
+        return meta::type(ty.inner_types[type_idx]);
     }
 
     /**
@@ -1950,6 +1983,47 @@ inline any::any(handle handle) noexcept
 inline meta::type any::type() const noexcept {
     return node ? node->clazz() : meta::type{};
 }
+ 
+inline any any::convert(meta::type type) const {
+	if (node->clazz().operator==(type)) {
+		return *this;
+	}
+
+	any any{};
+	const auto *conv = internal::find_if<&internal::type_node::conv>([type](auto *other) {
+		return other->ref()->clazz() == type;
+	}, node);
+
+	if (conv) {
+		any = conv->convert(instance);
+	}
+
+	return any;
+}
+
+inline bool any::convert(meta::type type) {
+	if(node == nullptr) {
+		return false;
+	}
+
+	bool valid = true;
+	if (node->clazz() != type) {
+		if (auto any = std::as_const(*this).convert(type); any) {
+			swap(any, *this);
+			valid = true;
+		}
+		else {
+			valid = false;
+		}
+	}
+
+	return valid;
+}
+
+inline handle::handle(meta::type type, void* instance_) noexcept
+	: node(type.node)
+	, instance(instance_)
+{}
 
 
 inline meta::type handle::type() const noexcept {
@@ -2017,6 +2091,8 @@ inline meta::type func::arg(size_type index) const noexcept {
 }
 
 
+using placeholder_type = uint8_t;
+
 /**
  * @cond TURN_OFF_DOXYGEN
  * Internal details not to be documented.
@@ -2037,6 +2113,31 @@ static bool compare(char, const void *lhs, const void *rhs) {
     return lhs == rhs;
 }
 
+template <typename> struct is_template : std::false_type {
+	using type = void;
+	using inner_type = void;
+
+	static inline gsl::span<internal::type_node *> resolveTypes() {
+		static std::array<type_node *, 1> types = { internal::info_node<void>::resolve() };
+		return gsl::make_span(types);
+	}
+};
+
+template <template <typename...> class Tmpl, typename T0, typename... OtherTypes>
+struct is_template<Tmpl<T0, OtherTypes...>> : std::true_type {
+    using type = Tmpl<meta::placeholder_type>;
+	static const unsigned num_types = sizeof...(OtherTypes) + 1;
+
+	
+	static inline gsl::span<internal::type_node *> resolveTypes() {
+		static std::array<internal::type_node *, num_types> all_nodes = {
+			internal::info_node<T0>::resolve(),
+			internal::info_node<OtherTypes>::resolve()...
+		};
+
+		return gsl::make_span(all_nodes);
+	}
+};
 
 template<typename Type>
 inline type_node * info_node<Type>::resolve() noexcept {
@@ -2065,6 +2166,16 @@ inline type_node * info_node<Type>::resolve() noexcept {
             },
             []() noexcept -> meta::type {
                 return &node;
+            },
+            []() noexcept -> type_node::template_typedata {
+				using is_template_type = is_template<Type>;
+                if constexpr(is_template_type::value) {
+                    return type_node::template_typedata{ internal::type_info<typename is_template_type::type>::resolve(), is_template<Type>::resolveTypes() };
+                }
+                else {
+					static std::array<type_node *, 1> types = { &node };
+                    return type_node::template_typedata{ &node, gsl::make_span(types) };
+                }
             }
         };
 
