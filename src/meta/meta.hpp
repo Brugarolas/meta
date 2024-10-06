@@ -525,6 +525,26 @@ public:
     }
 
     /**
+     * @brief Tries to steal the owenership of the contained instance.
+     *
+     * @tparam Type Type to which to cast the instance.
+     * @return A (possibly null) pointer to the contained instance and the destroy function.
+     */
+    template<typename Type>
+    std::pair<Type*, destroy_fn_type*> try_steal() noexcept {
+        Type* ptr = const_cast<Type *>(std::as_const(*this).try_cast<Type>());
+
+        if(!ptr) {
+            return { nullptr, nullptr };
+        }
+
+        auto pair = std::make_pair(ptr, destroy_fn);
+        destroy_fn = nullptr;
+
+        return pair;
+    }
+
+    /**
      * @brief Tries to cast an instance to a given type.
      *
      * The type of the instance must be such that the cast is possible.
@@ -1539,6 +1559,15 @@ public:
     {}
 
     /**
+     * @brief Returns meta's internal identifier.
+     *
+     * @return The internal identifier of the meta type.
+     */
+    std::size_t internal_dentifier() const noexcept {
+        return node->identifier;
+    }
+
+    /**
      * @brief Indicates whether a given meta type refers to void or not.
      * @return True if the underlying type is void, false otherwise.
      */
@@ -1788,6 +1817,12 @@ public:
         return curr ? curr->clazz() : meta::data{};
     }
 
+    // FIXME: Not working
+    // template <auto Data>
+    // meta::data data() const noexcept {
+    //     return meta::data{};
+    // }
+
     /**
      * @brief Iterates all the meta functions of a meta type.
      *
@@ -1849,6 +1884,36 @@ public:
         }, node);
 
         return any;
+    }
+
+    /**
+     * @brief Creates a shared ptr of the underlying type, if possible.
+     *
+     * @tparam Base The base type of the shared ptr.
+     * @tparam Args Types of arguments to use to construct the instance.
+     * @param args The parameters to use to construct the instance.
+     * @return A meta any containing the new instance, if any.
+     */
+    template<typename Base, typename... Args>
+    std::shared_ptr<Base> construct_shared(Args &&... args) const {
+        std::array<any, sizeof...(Args)> arguments{{std::forward<Args>(args)...}};
+        any any{};
+
+        internal::find_if<&internal::type_node::ctor>([data = arguments.data(), &any](auto *curr) -> bool {
+            if(curr->size == sizeof...(args)) {
+                any = curr->invoke(data);
+            }
+
+            return static_cast<bool>(any);
+        }, node);
+
+        auto pair = any.try_steal<Base>();
+
+        if (!pair.first) {
+            return nullptr;
+        }
+
+        return std::shared_ptr<Base>(pair.first, *pair.second);
     }
 
     /**
@@ -1921,6 +1986,16 @@ public:
      */
     bool operator==(const type &other) const noexcept {
         return node == other.node;
+    }
+
+    /**
+     * @brief If a name property was set, returns the name property of the underlying type.
+     * @return The name property of the underlying type, if any.
+     */
+    std::string get_name() const noexcept {
+        std::hash<std::string_view> hash;
+        auto property = prop(hash("name"));
+        return property ? property.value().cast<std::string>() : "";
     }
 
 private:
